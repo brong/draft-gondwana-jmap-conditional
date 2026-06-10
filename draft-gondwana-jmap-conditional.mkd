@@ -1,0 +1,322 @@
+---
+title: JMAP Conditional Set
+abbrev: JMAP Conditional
+docname: draft-gondwana-jmap-conditional-00
+submissionType: IETF
+category: std
+updates: 8620
+obsoletes:
+ipr: trust200902
+keyword: Internet-Draft
+stand_alone: yes
+pi: [toc, sortrefs, symrefs]
+
+author:
+ -
+    ins: B. Gondwana
+    name: Bron Gondwana
+    org: Fastmail
+    email: brong@fastmailteam.com
+
+normative:
+    JMAP-CORE: RFC8620
+
+informative:
+    JMAP-MAIL: RFC8621
+    HTTP-SEMANTICS: RFC9110
+    WEBDAV: RFC4918
+    JMAP-FILENODE: I-D.ietf-jmap-filenode
+
+--- abstract
+
+The JMAP base protocol ({{JMAP-CORE}}) provides the Foo/set method for
+creating, updating, and destroying objects.  It offers a single concurrency
+control, the "ifInState" argument, which guards an entire object type: if any
+object of that type has changed, the whole method is rejected.
+
+This extension adds a finer, per-object conditional mechanism.  A client may
+require that an individual update or destroy proceed only if the target object
+still matches a set of expected property values, expressed using the JMAP
+PatchObject already defined for updates.  This provides optimistic concurrency
+control scoped to a single object — the equivalent of an HTTP "If-Match"
+precondition — for any JMAP data type.
+
+--- middle
+
+# Introduction
+
+The Foo/set method defined in {{JMAP-CORE}} is the mechanism by which clients
+create, update, and destroy objects.  It provides one form of concurrency
+control: the optional "ifInState" argument, which aborts the entire method if
+the account's state string for that data type does not match the value the
+client supplies.
+
+This guard is coarse.  The state string changes whenever *any* object of that
+type changes, by any client.  In a busy account — or one that receives
+server-initiated changes, such as the arrival of new mail — the state can
+change between a client's read and its write for reasons entirely unrelated to
+the object the client is modifying.  Using "ifInState" to protect a single
+update therefore leads to frequent spurious rejections and retries.
+
+Clients commonly need a narrower guarantee: "apply this change only if the
+specific object I read still holds the values I depend on".  This is the same
+need met by the HTTP "If-Match" precondition ({{HTTP-SEMANTICS}}) and the
+entity-tag model of WebDAV ({{WEBDAV}}): a conditional write scoped to a single
+resource.
+
+This document defines a generic, per-object conditional mechanism for Foo/set.
+It introduces no new properties and no new version tokens.  Instead it reuses
+the PatchObject already defined by {{JMAP-CORE}} for updates: a client states
+its precondition as a PatchObject describing the values it expects the object
+to currently hold, and the server performs the change only if applying that
+patch would change nothing.
+
+Because the mechanism is defined entirely in terms of an object's properties
+and the existing PatchObject semantics, it applies uniformly to every data
+type that implements Foo/set, with no per-type additions.
+
+## Conventions Used in This Document
+
+{::boilerplate bcp14-tagged}
+
+The terms "Id", "PatchObject", "SetError", and "Foo/set" are defined in
+{{JMAP-CORE}}.  A "pointer" is a JSON Pointer as used within a PatchObject
+(see {{JMAP-CORE}}, Section 5.3).
+
+# Addition to the Capabilities Object
+
+## urn:ietf:params:jmap:conditional
+
+The presence of the "urn:ietf:params:jmap:conditional" property in the
+"capabilities" object of the JMAP Session resource indicates support for the
+conditional Foo/set behaviour defined in this document.  The value of this
+property MUST be an empty object.
+
+A client indicates that it wishes to use this extension by including the
+capability URI in the "using" array of a request.  When a server that
+advertises this capability receives a request whose "using" array includes
+this URI, it MUST honour the "ifUnchangedBy" argument ({{conditional-set}}) on
+every Foo/set method it implements.
+
+The capability is generic: it does not depend on any particular data type, and
+its presence applies to all types for which the server implements Foo/set.
+
+### Capability Example
+
+~~~
+"urn:ietf:params:jmap:conditional": {}
+~~~
+
+# Conditional Foo/set {#conditional-set}
+
+This document adds one argument to the standard Foo/set method
+({{JMAP-CORE}}, Section 5.3):
+
+* ifUnchangedBy: "Id\[PatchObject\]" (default: an empty object)
+
+  A map of object id to a PatchObject expressing a precondition on that
+  object.  For each entry, the precondition is satisfied if and only if
+  applying the given PatchObject to the current server-side object would
+  leave the object unchanged.
+
+  Equivalently: for every pointer in the PatchObject, the object's current
+  value at that pointer MUST equal the value given in the PatchObject.  A
+  JSON "null" value matches a property that is not present (it asserts that
+  removing the property would be a no-op).  Comparison uses the same
+  representation the server would return for that property from Foo/get.
+
+## Evaluation Rules
+
+1.  Preconditions are evaluated against the state of each object as it exists
+    at the start of the method, before any create, update, or destroy in the
+    same method is applied.
+
+2.  The "ifUnchangedBy" argument applies only to objects identified by an
+    existing id.  Each id used as a key in "ifUnchangedBy" MUST also appear as
+    a key in the "update" argument or as a member of the "destroy" argument of
+    the same method.  If an id appears in "ifUnchangedBy" but in neither, the
+    server MUST reject the whole method with an "invalidArguments" error.  A
+    creation id (an id prefixed with "#") MUST NOT be used as a key in
+    "ifUnchangedBy"; "create" has no prior state to condition upon.
+
+3.  Unlike the PatchObject supplied in the "update" argument, which may only
+    reference properties the client is permitted to set, the PatchObject in
+    "ifUnchangedBy" MAY reference any property of the object, including
+    server-set and otherwise read-only properties (for example a content
+    identifier, a size, or a server-maintained change timestamp).  This allows
+    a client to condition a change on properties it cannot itself modify.
+
+4.  If a pointer in an "ifUnchangedBy" PatchObject is not a valid pointer for
+    the object's type, the server MUST treat the affected id as it would an
+    invalid update: the id is added to "notUpdated" or "notDestroyed" with an
+    "invalidPatch" SetError.
+
+5.  The "ifUnchangedBy" argument is independent of, and composes with, the
+    method-level "ifInState" argument.  If both are supplied, the server first
+    checks "ifInState" (rejecting the whole method with a "stateMismatch"
+    error if it does not match), and then evaluates the per-object
+    preconditions.
+
+## Effect
+
+If the precondition for an id is satisfied, the corresponding update or
+destroy proceeds exactly as it would without this extension.
+
+If the precondition is not satisfied, the server MUST NOT perform the
+corresponding update or destroy.  It MUST instead add the id to "notUpdated"
+(if the id appeared in "update") or "notDestroyed" (if the id appeared in
+"destroy"), with a SetError of type "stateMismatch" ({{statemismatch}}).
+
+As with all Foo/set processing, each id is handled independently: a failed
+precondition on one id does not prevent other ids in the same method, whose
+preconditions are satisfied and which are otherwise valid, from succeeding.
+
+## The "stateMismatch" SetError {#statemismatch}
+
+This document defines a new SetError type, "stateMismatch", for use in the
+"notUpdated" and "notDestroyed" maps of a Foo/set response.  It indicates that
+an "ifUnchangedBy" precondition for the id was not satisfied: the object's
+current server-side state differs from the state the client asserted.
+
+The SetError object has no properties beyond the common "type" property and an
+optional "description".  In particular it does not echo the object's current
+values; a client that needs them fetches the current state of the object (for
+example via Foo/get or Foo/changes) before deciding how to proceed.
+
+Note: {{JMAP-CORE}} uses the term "stateMismatch" for the method-level error
+returned when "ifInState" does not match.  The SetError defined here is the
+per-object analogue.  The two are distinguished by their position in the
+response: a method-level error object versus a SetError appearing within
+"notUpdated" or "notDestroyed".
+
+# Examples
+
+## Force-with-lease on file content
+
+A client last synchronised a file node "f42" with content blob "G_old".  It has
+since produced new content "G_new", and wishes to replace the content only if no
+other client has changed it in the meantime.  It conditions on the server-set
+"blobId" ({{JMAP-FILENODE}}):
+
+~~~
+[[ "FileNode/set", {
+  "accountId": "u1",
+  "ifUnchangedBy": { "f42": { "blobId": "G_old" } },
+  "update":       { "f42": { "blobId": "G_new",
+                             "modified": "2026-05-01T09:30:00Z" } }
+}, "0" ]]
+~~~
+
+If "f42" still references "G_old", the update succeeds.  If another client has
+already replaced the content (so "blobId" is now, say, "G_other"), the
+precondition fails and the server makes no change:
+
+~~~
+[[ "FileNode/set", {
+  "accountId": "u1",
+  "oldState": "f1a2",
+  "newState": "f1a2",
+  "updated": null,
+  "notUpdated": { "f42": { "type": "stateMismatch" } }
+}, "0" ]]
+~~~
+
+The client fetches "f42", resolves the conflict (for instance by preserving its
+own version as a separate file), and retries.
+
+## Conditional destroy
+
+Destroy a message only if it has not been read on another device.  In
+{{JMAP-MAIL}}, an unread message has no "$seen" keyword, so the client asserts
+that "keywords/$seen" is absent:
+
+~~~
+[[ "Email/set", {
+  "accountId": "u1",
+  "ifUnchangedBy": { "M7": { "keywords/$seen": null } },
+  "destroy":      [ "M7" ]
+}, "0" ]]
+~~~
+
+If the message has since been marked "$seen", "M7" is returned in
+"notDestroyed" with a "stateMismatch" SetError and is not deleted.
+
+## A condition that ignores unrelated changes
+
+Because the precondition references only the pointers the client supplies,
+concurrent changes to other properties of the same object do not cause it to
+fail.  Here a client removes a grantee's access, but only if that grantee
+currently holds exactly the rights the client saw:
+
+~~~
+[[ "FileNode/set", {
+  "accountId": "u1",
+  "ifUnchangedBy": { "d3": { "shareWith/bob/mayRead": true } },
+  "update":       { "d3": { "shareWith/bob": null } }
+}, "0" ]]
+~~~
+
+The change applies only if Bob currently has "mayRead" of "true".  A concurrent
+change to an unrelated property of "d3" (its name, or another grantee's rights)
+does not trigger a "stateMismatch".
+
+## Whole-object compare-and-swap
+
+A data type that maintains a server-set change token can be used to require
+that nothing at all has changed.  For example, a type with a server-maintained
+"changed" timestamp that is updated on every modification:
+
+~~~
+"ifUnchangedBy": { "f42": { "changed": "2026-04-30T12:00:00Z" } }
+~~~
+
+Because the server updates "changed" on any modification to the object, this
+asserts that the entire object is unchanged since the client last read it,
+recovering the coarse "If-Match" behaviour as a special case of the general
+mechanism.
+
+# IANA Considerations
+
+## JMAP Capability Registration for "conditional"
+
+IANA is requested to register the "conditional" JMAP Capability as follows, in
+the "JMAP Capabilities" registry established by {{JMAP-CORE}}:
+
+Capability Name:
+: urn:ietf:params:jmap:conditional
+
+Specification document:
+: this document
+
+Intended use:
+: common
+
+Change Controller:
+: IETF
+
+Security and privacy considerations:
+: this document, {{security}}
+
+# Security Considerations {#security}
+
+## Information Disclosure
+
+The conditional mechanism returns no object data.  A failed precondition yields
+only a "stateMismatch" SetError with no payload, disclosing nothing beyond the
+single fact that the asserted state did not hold — information the client could
+already obtain by reading the object with Foo/get.
+
+A precondition does not bypass access control.  A server MUST require the same
+permissions to read the properties referenced in an "ifUnchangedBy" PatchObject
+as it would to return them from Foo/get.  In particular, a server MUST NOT
+evaluate a precondition on a property the requesting client is not permitted to
+read; such a condition MUST fail with a "forbidden" SetError, so that the
+mechanism cannot be used as an oracle to probe the values of properties the
+client cannot otherwise see.
+
+## Resource Consumption
+
+Evaluating a precondition is comparable in cost to validating an update
+PatchObject and imposes no significant additional load.
+
+--- back
