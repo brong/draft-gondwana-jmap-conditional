@@ -1,7 +1,7 @@
 ---
 title: JMAP Conditional Set
 abbrev: JMAP Conditional
-docname: draft-gondwana-jmap-conditional-00
+docname: draft-ietf-jmap-conditional-00
 submissionType: IETF
 category: std
 updates: 8620
@@ -41,6 +41,12 @@ PatchObject already defined for updates.  This provides optimistic concurrency
 control scoped to a single object — the equivalent of an HTTP "If-Match"
 precondition — for any JMAP data type.
 
+This extension also defines an optional "atomic" argument that applies an
+entire Foo/set as a single unit: either every change it requests takes effect,
+or none does.  Combined with the per-object precondition, this lets a client
+express a multi-object change that is safe only when applied together — such as
+an atomic rename that exchanges two names.
+
 --- middle
 
 # Introduction
@@ -75,6 +81,16 @@ Because the mechanism is defined entirely in terms of an object's properties
 and the existing PatchObject semantics, it applies uniformly to every data
 type that implements Foo/set, with no per-type additions.
 
+A second, related need is atomicity.  {{JMAP-CORE}} processes the creations,
+updates, and destroys within a Foo/set independently: some may succeed while
+others fail, and the method gives no guarantee that a set of related changes
+takes effect together.  The only all-or-nothing control Core offers is
+"ifInState", which — like the concurrency problem above — is scoped to the
+entire object type rather than to the changes the client actually requested.
+This document therefore also defines an optional "atomic" argument that commits
+a Foo/set as a single unit, evaluated against the state that results from
+applying all of its changes together (see {{atomic}}).
+
 ## Conventions Used in This Document
 
 {::boilerplate bcp14-tagged}
@@ -96,7 +112,10 @@ A client indicates that it wishes to use this extension by including the
 capability URI in the "using" array of a request.  When a server that
 advertises this capability receives a request whose "using" array includes
 this URI, it MUST honour the "ifUnchangedBy" argument ({{conditional-set}}) on
-every Foo/set method it implements.
+every Foo/set method it implements.  It MUST also honour the "atomic" argument
+({{atomic}}): either applying the method atomically, or, if it cannot, rejecting
+it with a "cannotApplyAtomically" error ({{atomic}}).  A server MUST NOT apply
+the changes of a method requested with "atomic" only in part.
 
 The capability is generic: it does not depend on any particular data type, and
 its presence applies to all types for which the server implements Foo/set.
@@ -109,7 +128,7 @@ its presence applies to all types for which the server implements Foo/set.
 
 # Conditional Foo/set {#conditional-set}
 
-This document adds one argument to the standard Foo/set method
+This document adds the following arguments to the standard Foo/set method
 ({{JMAP-CORE}}, Section 5.3):
 
 * ifUnchangedBy: "Id\[PatchObject\]" (default: an empty object)
@@ -125,19 +144,29 @@ This document adds one argument to the standard Foo/set method
   removing the property would be a no-op).  Comparison uses the same
   representation the server would return for that property from Foo/get.
 
+* atomic: "Boolean" (default: false)
+
+  If true, the Foo/set is applied as a single unit: the server MUST either
+  commit every creation, update, and destroy the method requests, or make no
+  change at all.  See {{atomic}}.
+
 ## Evaluation Rules
 
 1.  Preconditions are evaluated against the state of each object as it exists
     at the start of the method, before any create, update, or destroy in the
     same method is applied.
 
-2.  The "ifUnchangedBy" argument applies only to objects identified by an
-    existing id.  Each id used as a key in "ifUnchangedBy" MUST also appear as
-    a key in the "update" argument or as a member of the "destroy" argument of
-    the same method.  If an id appears in "ifUnchangedBy" but in neither, the
-    server MUST reject the whole method with an "invalidArguments" error.  A
-    creation id (an id prefixed with "#") MUST NOT be used as a key in
-    "ifUnchangedBy"; "create" has no prior state to condition upon.
+2.  Each key in "ifUnchangedBy" is the id of an object of the same type as the
+    method (the "Foo" of "Foo/set").  The object need not be one the method
+    changes.  A client MAY set a precondition on an object the method does not
+    change, for example its parent.  A precondition is not satisfied if its
+    object does not exist, or is not visible to the client.  The server then
+    handles it as in {{effect}}.  A creation id (an id prefixed with "#") MAY
+    be a key.  It references an object created by an earlier method call in the
+    same request ({{JMAP-CORE}}, Section 5.3).  If the creation id resolves to
+    an object of a different type, the server MUST reject the whole method with
+    an "invalidArguments" error.  This lets a client require that an object it
+    created earlier in the request has not changed since then.
 
 3.  Unlike the PatchObject supplied in the "update" argument, which may only
     reference properties the client is permitted to set, the PatchObject in
@@ -147,49 +176,100 @@ This document adds one argument to the standard Foo/set method
     a client to condition a change on properties it cannot itself modify.
 
 4.  If a pointer in an "ifUnchangedBy" PatchObject is not a valid pointer for
-    the object's type, the server MUST treat the affected id as it would an
-    invalid update: the id is added to "notUpdated" or "notDestroyed" with an
-    "invalidPatch" SetError.
+    the object's type, or the PatchObject is otherwise malformed, the server
+    MUST reject the whole method with an "invalidArguments" error.
 
-5.  The "ifUnchangedBy" argument is independent of, and composes with, the
-    method-level "ifInState" argument.  If both are supplied, the server first
-    checks "ifInState" (rejecting the whole method with a "stateMismatch"
-    error if it does not match), and then evaluates the per-object
-    preconditions.
+5.  The "ifUnchangedBy" and "ifInState" arguments are both method-level guards
+    and compose.  If both are supplied, the server checks "ifInState" first and
+    then the "ifUnchangedBy" preconditions; if either does not hold, the method
+    is rejected with a "stateMismatch" error and no change is made.
 
-## Effect
+## Effect {#effect}
 
-If the precondition for an id is satisfied, the corresponding update or
-destroy proceeds exactly as it would without this extension.
+If every precondition in "ifUnchangedBy" is satisfied, the method proceeds
+exactly as it would without this extension.
 
-If the precondition is not satisfied, the server MUST NOT perform the
-corresponding update or destroy.  It MUST instead add the id to "notUpdated"
-(if the id appeared in "update") or "notDestroyed" (if the id appeared in
-"destroy"), with a SetError of type "stateMismatch" ({{statemismatch}}).
+If any precondition is not satisfied, the server MUST make no change — no
+creation, update, or destroy in the method takes effect — and MUST reject the
+whole method with a method-level "stateMismatch" error ({{statemismatch}}).
+The state string for the type MUST be unchanged.
 
-As with all Foo/set processing, each id is handled independently: a failed
-precondition on one id does not prevent other ids in the same method, whose
-preconditions are satisfied and which are otherwise valid, from succeeding.
+This is all-or-nothing at the method level, by design: a single Foo/set is
+the unit of conditional application.  A client that wants changes to succeed or
+fail independently of one another places them in separate method calls within
+the same request, each with its own "ifUnchangedBy".
 
-## The "stateMismatch" SetError {#statemismatch}
+## The "stateMismatch" error {#statemismatch}
 
-This document defines a new SetError type, "stateMismatch", for use in the
-"notUpdated" and "notDestroyed" maps of a Foo/set response.  It indicates that
-an "ifUnchangedBy" precondition for the id was not satisfied: the object's
-current server-side state differs from the state the client asserted.
+A failed "ifUnchangedBy" precondition is reported using the method-level
+"stateMismatch" error already defined by {{JMAP-CORE}} for a failed "ifInState"
+guard.  It is returned as an "error" response in place of the Foo/set response,
+so no create, update, or destroy result is returned and the client knows the
+method made no change.
 
-The SetError object has no properties beyond the common "type" property and an
-optional "description".  In particular it does not echo the object's current
-values; a client that needs them fetches the current state of the object (for
-example via Foo/get or Foo/changes) before deciding how to proceed.
+The error discloses no object data: a client that needs the current values
+fetches them with Foo/get or Foo/changes before deciding how to proceed.  A
+server MAY include a "description" for debugging, and MAY include:
 
-Note: {{JMAP-CORE}} uses the term "stateMismatch" for the method-level error
-returned when "ifInState" does not match.  The SetError defined here is the
-per-object analogue.  The two are distinguished by their position in the
-response: a method-level error object versus a SetError appearing within
-"notUpdated" or "notDestroyed".
+* failed: "Id\[\]"
 
-# Examples
+  The ids of the objects whose preconditions were not satisfied.  This lets a
+  client re-fetch only what it needs, without disclosing any values.  A server
+  that does not wish to distinguish which precondition failed MAY omit this
+  property.
+
+# Atomic Foo/set {#atomic}
+
+When the "atomic" argument is true, the server MUST apply the Foo/set as a
+single unit: either every creation, update, and destroy the method requests
+takes effect, or none of them does.
+
+## Evaluation
+
+The server evaluates the method as though all of its changes were applied
+together.  Any constraint that {{JMAP-CORE}} or a data-type extension evaluates
+on the resulting object set — for example a uniqueness constraint on a name
+within a parent — is checked once, against the state produced by applying all
+the changes, not against any intermediate state.
+
+This is what lets a set of changes that is valid only as a whole succeed.  For
+example, exchanging two names — renaming object A to the name currently held by
+B and B to the name currently held by A — collides if applied one change at a
+time, but the combined result is conflict-free (see {{exchange}}).
+
+## Failure
+
+If any part of an atomic method fails — an invalid patch, a name collision, a
+permission error, a violated constraint, or any other SetError that would place
+an id in "notCreated", "notUpdated", or "notDestroyed" — the server MUST make
+no change and MUST reject the whole method with a method-level "atomicFailure"
+error.  The state string for the type MUST be unchanged.
+
+A failed "ifUnchangedBy" precondition is reported as a "stateMismatch" error
+({{statemismatch}}) whether or not "atomic" is set; preconditions are already
+all-or-nothing at the method level.  The "atomicFailure" error is specific to
+the method's own creations, updates, and destroys not being committable
+together.
+
+The "atomicFailure" error object MAY carry "notCreated", "notUpdated", and
+"notDestroyed" maps — of the same form as a Foo/set response — identifying the
+ids whose processing failed and the SetError for each.  Ids that would have
+succeeded are omitted; they were not committed, because the method as a whole
+was rejected.  A server MAY report only the first failure it encounters.
+
+## Servers That Cannot Apply Atomically {#cannotapply}
+
+A server that advertises this capability but cannot apply a given method
+atomically — either at all, or because this particular method is beyond what it
+can commit as a unit — MUST reject the method with a method-level
+"cannotApplyAtomically" error and make no change.  It MUST NOT fall back to
+applying the changes non-atomically.
+
+A client that receives "cannotApplyAtomically" MAY retry without "atomic" if it
+can tolerate partial application, or surface the failure otherwise.  A client
+that does not recognise the error treats it as "serverFail" ({{JMAP-CORE}}):
+since a rejected atomic method makes no change, this fallback is safe, if less
+informative.
 
 ## Force-with-lease on file content
 
@@ -209,15 +289,13 @@ other client has changed it in the meantime.  It conditions on the server-set
 
 If "f42" still references "G_old", the update succeeds.  If another client has
 already replaced the content (so "blobId" is now, say, "G_other"), the
-precondition fails and the server makes no change:
+precondition fails and the server makes no change, returning a method-level
+"stateMismatch" error:
 
 ~~~
-[[ "FileNode/set", {
-  "accountId": "u1",
-  "oldState": "f1a2",
-  "newState": "f1a2",
-  "updated": null,
-  "notUpdated": { "f42": { "type": "stateMismatch" } }
+[[ "error", {
+  "type": "stateMismatch",
+  "failed": [ "f42" ]
 }, "0" ]]
 ~~~
 
@@ -238,8 +316,8 @@ that "keywords/$seen" is absent:
 }, "0" ]]
 ~~~
 
-If the message has since been marked "$seen", "M7" is returned in
-"notDestroyed" with a "stateMismatch" SetError and is not deleted.
+If the message has since been marked "$seen", the precondition fails, the whole
+method is rejected with a "stateMismatch" error, and "M7" is not deleted.
 
 ## A condition that ignores unrelated changes
 
@@ -260,6 +338,27 @@ The change applies only if Bob currently has "mayRead" of "true".  A concurrent
 change to an unrelated property of "d3" (its name, or another grantee's rights)
 does not trigger a "stateMismatch".
 
+## Conditioning on an object the method does not change
+
+A precondition may name an object the method is not creating, updating, or
+destroying.  Here a client updates the content of file "f42", but only if it is
+still in the parent directory the client last saw ("d3"), so the write does not
+land in an unexpected place after a concurrent move:
+
+~~~
+[[ "FileNode/set", {
+  "accountId": "u1",
+  "ifUnchangedBy": { "f42": { "parentId": "d3" },
+                     "d3":  { "name": "Reports" } },
+  "update":       { "f42": { "blobId": "G_new",
+                             "modified": "2026-05-01T09:30:00Z" } }
+}, "0" ]]
+~~~
+
+If either "f42" has been reparented or "d3" has been renamed, the method is
+rejected with a "stateMismatch" error and the content is not written, even
+though "d3" itself is not being changed.
+
 ## Whole-object compare-and-swap
 
 A data type that maintains a server-set change token can be used to require
@@ -274,6 +373,29 @@ Because the server updates "changed" on any modification to the object, this
 asserts that the entire object is unchanged since the client last read it,
 recovering the coarse "If-Match" behaviour as a special case of the general
 mechanism.
+
+## Atomic exchange of two names {#exchange}
+
+Two file nodes, "a" (named "current.txt") and "b" (named "previous.txt"), are
+to swap names.  Applied one at a time, either rename collides with the name the
+other still holds; applied together, the result is conflict-free.  With
+"atomic" set, the rule that sibling names are unique is evaluated only against
+the resulting state:
+
+~~~
+[[ "FileNode/set", {
+  "accountId": "u1",
+  "atomic": true,
+  "update": {
+    "a": { "name": "previous.txt" },
+    "b": { "name": "current.txt" }
+  }
+}, "0" ]]
+~~~
+
+Both renames take effect, or — if either is rejected for any reason — neither
+does, and the server returns an "atomicFailure" error identifying the offending
+id.
 
 # IANA Considerations
 
@@ -297,26 +419,113 @@ Change Controller:
 Security and privacy considerations:
 : this document, {{security}}
 
+## JMAP Error Code Registration for "atomicFailure"
+
+IANA is requested to register the "atomicFailure" JMAP Error Code in the "JMAP
+Error Codes" registry established by {{JMAP-CORE}}:
+
+JMAP Error Code:
+: atomicFailure
+
+Intended use:
+: common
+
+Change Controller:
+: IETF
+
+Description:
+: A Foo/set requested with "atomic" set to true could not commit all of its
+  changes together; no change was made.  Returned as a method-level error.
+
+Reference:
+: this document
+
+## JMAP Error Code Registration for "cannotApplyAtomically"
+
+IANA is requested to register the "cannotApplyAtomically" JMAP Error Code in
+the "JMAP Error Codes" registry established by {{JMAP-CORE}}:
+
+JMAP Error Code:
+: cannotApplyAtomically
+
+Intended use:
+: common
+
+Change Controller:
+: IETF
+
+Description:
+: A Foo/set was requested with "atomic" set to true, but the server cannot
+  apply this method atomically; no change was made.  Returned as a method-level
+  error.
+
+Reference:
+: this document
+
 # Security Considerations {#security}
 
 ## Information Disclosure
 
 The conditional mechanism returns no object data.  A failed precondition yields
-only a "stateMismatch" SetError with no payload, disclosing nothing beyond the
-single fact that the asserted state did not hold — information the client could
-already obtain by reading the object with Foo/get.
+only a "stateMismatch" error, optionally naming the ids whose preconditions did
+not hold, but never their values — nothing beyond what the client could already
+obtain by reading the objects with Foo/get.
 
 A precondition does not bypass access control.  A server MUST require the same
 permissions to read the properties referenced in an "ifUnchangedBy" PatchObject
 as it would to return them from Foo/get.  In particular, a server MUST NOT
 evaluate a precondition on a property the requesting client is not permitted to
-read; such a condition MUST fail with a "forbidden" SetError, so that the
-mechanism cannot be used as an oracle to probe the values of properties the
-client cannot otherwise see.
+read; such a condition MUST cause the method to fail with a "forbidden" error,
+so that the mechanism cannot be used as an oracle to probe the values of
+properties the client cannot otherwise see.
+
+## Atomic Methods and Resource Consumption
+
+Applying a method atomically may require the server to hold a transaction, or
+equivalent locks, across all of its changes, and so a very large atomic Foo/set
+can hold resources longer than the same changes made independently.  The limits
+a server already applies to the number of objects in a single Foo/set
+({{JMAP-CORE}}) continue to apply, and a server MAY reject an atomic method it
+considers too large rather than attempt it.
 
 ## Resource Consumption
 
 Evaluating a precondition is comparable in cost to validating an update
 PatchObject and imposes no significant additional load.
+
+# Changes
+
+EDITOR: please remove this section before publication.
+
+The source of this document exists on github at:
+https://github.com/brong/draft-gondwana-jmap-conditional/
+
+**draft-ietf-jmap-conditional-00**
+
+* Upload with working-group adopted name.
+
+**draft-gondwana-jmap-conditional-01**
+
+* Added the "atomic" argument to Foo/set: a method requested with "atomic" is
+  applied as a single unit, with constraints evaluated against the resulting
+  state (enabling changes valid only as a whole, such as an atomic name
+  exchange).
+* Added the "atomicFailure" method-level error (the method's changes could not
+  be committed together) and the "cannotApplyAtomically" method-level error
+  (the server cannot apply the method atomically), both registered with IANA.
+  A server MUST NOT apply an atomic method's changes only in part.
+* Generalised "ifUnchangedBy" to allow a precondition on any object of the
+  method's type, including objects the method does not itself create, update,
+  or destroy (for example a parent or container).
+* Changed the effect of a failed precondition from a per-object "stateMismatch"
+  SetError to a method-level "stateMismatch" error that rejects the whole
+  method and makes no change; a client wanting independent application uses
+  separate method calls.  Removed the bespoke per-object SetError definition in
+  favour of Core's method-level "stateMismatch", optionally carrying the
+  "failed" ids.
+
+**draft-gondwana-jmap-conditional-00**
+
+* Initial proposal.
 
 --- back
