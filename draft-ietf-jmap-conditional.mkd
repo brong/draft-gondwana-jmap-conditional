@@ -1,7 +1,7 @@
 ---
 title: JMAP Conditional Set
 abbrev: JMAP Conditional
-docname: draft-ietf-jmap-conditional-00
+docname: draft-ietf-jmap-conditional-01
 submissionType: IETF
 category: std
 updates: 8620
@@ -26,6 +26,7 @@ informative:
     HTTP-SEMANTICS: RFC9110
     WEBDAV: RFC4918
     JMAP-FILENODE: I-D.ietf-jmap-filenode
+    IMPL-STATUS: RFC7942
 
 --- abstract
 
@@ -232,10 +233,15 @@ on the resulting object set — for example a uniqueness constraint on a name
 within a parent — is checked once, against the state produced by applying all
 the changes, not against any intermediate state.
 
-This is what lets a set of changes that is valid only as a whole succeed.  For
-example, exchanging two names — renaming object A to the name currently held by
-B and B to the name currently held by A — collides if applied one change at a
-time, but the combined result is conflict-free (see {{exchange}}).
+This guarantees that a set of changes that is valid only as a whole can
+succeed.  For example, exchanging two names — renaming object A to the name
+currently held by B and B to the name currently held by A — collides if applied
+one change at a time, but the combined result is conflict-free.  {{JMAP-CORE}},
+Section 5.3 already permits a server to accept such a change when the final
+state is valid, but also permits it to process the changes sequentially and
+reject one of them, possibly after committing the other.  With "atomic", the
+client can rely on the server evaluating the final state, and on the changes
+succeeding or failing together (see {{exchange}}).
 
 ## Failure
 
@@ -270,6 +276,8 @@ can tolerate partial application, or surface the failure otherwise.  A client
 that does not recognise the error treats it as "serverFail" ({{JMAP-CORE}}):
 since a rejected atomic method makes no change, this fallback is safe, if less
 informative.
+
+# Examples
 
 ## Force-with-lease on file content
 
@@ -378,9 +386,10 @@ mechanism.
 
 Two file nodes, "a" (named "current.txt") and "b" (named "previous.txt"), are
 to swap names.  Applied one at a time, either rename collides with the name the
-other still holds; applied together, the result is conflict-free.  With
-"atomic" set, the rule that sibling names are unique is evaluated only against
-the resulting state:
+other still holds; applied together, the result is conflict-free.  A server
+conforming only to {{JMAP-CORE}} may accept this swap, but is not required to.
+With "atomic" set, the rule that sibling names are unique is evaluated only
+against the resulting state:
 
 ~~~
 [[ "FileNode/set", {
@@ -396,6 +405,99 @@ the resulting state:
 Both renames take effect, or — if either is rejected for any reason — neither
 does, and the server returns an "atomicFailure" error identifying the offending
 id.
+
+## Atomic replace of one file by another {#replace}
+
+A common pattern in POSIX applications is to write new content to a temporary
+file and then rename it over the original, so that other readers see either the
+complete old file or the complete new one, never a partial write.  Here "t"
+(named "report.txt.tmp") holds the new content, and "r" (named "report.txt",
+with content "G_old") is the file to be replaced:
+
+~~~
+[[ "FileNode/set", {
+  "accountId": "u1",
+  "atomic": true,
+  "ifUnchangedBy": { "r": { "blobId": "G_old" } },
+  "update":  { "t": { "name": "report.txt" } },
+  "destroy": [ "r" ]
+}, "0" ]]
+~~~
+
+Without "atomic", a server may process each change sequentially against the
+current state ({{JMAP-CORE}}, Section 5.3), so the rename of "t" could be
+rejected because "r" still holds the name, while the destroy of "r" succeeds,
+leaving neither file named "report.txt".  With "atomic", the sibling-name
+uniqueness rule is evaluated only against the resulting state, in which "r" no
+longer exists, and the two changes succeed or fail together.
+
+The "ifUnchangedBy" precondition additionally ensures that "r" is replaced only
+if no other client has changed its content since this client read it; if it has,
+the method is rejected with a "stateMismatch" error and neither file is changed.
+A client that wants the unconditional behaviour of POSIX rename(2) omits the
+precondition.
+
+# Implementation Considerations
+
+## Evaluating Preconditions
+
+A server can implement "ifUnchangedBy" generically, without code specific to any
+data type.  For each entry, the server reads the current object in the
+representation it would return from Foo/get, applies the PatchObject to a copy
+of it using the same logic it uses for the "update" argument, and compares the
+result with the original.  Any difference means the precondition is not
+satisfied.  Every data type that supports Foo/set already has both a Foo/get
+representation and PatchObject application, so no new per-type machinery is
+required.
+
+A server MAY instead compare the referenced values directly, or use any cheaper
+method, provided the outcome is the same.
+
+The precondition check is only meaningful if no other change to the referenced
+objects can occur between evaluating the preconditions and applying the
+method's changes.  A server therefore evaluates the preconditions and applies
+the changes within the same lock or transaction.
+
+## Applying Methods Atomically
+
+A server backed by a transactional store can implement "atomic" by performing
+the whole Foo/set within a single transaction, deferring constraint checks such
+as name uniqueness until all of the changes have been applied, and rolling the
+transaction back if any part fails.  A server that cannot do this for some or
+all of its data types still supports this extension by returning
+"cannotApplyAtomically" ({{cannotapply}}) for those methods.
+
+# Implementation Status
+
+EDITOR: please remove this section before publication.
+
+This section records the status of known implementations of the protocol
+defined by this specification at the time of posting of this Internet-Draft,
+and is based on a proposal described in {{IMPL-STATUS}}.  The description of
+implementations in this section is intended to assist the IETF in its
+decision processes in progressing drafts to RFCs.  Please note that the listing
+of any individual implementation here does not imply endorsement by the IETF.
+Furthermore, no effort has been spent to verify the information presented here
+that was supplied by IETF contributors.  This is not intended as, and must not
+be construed to be, a catalog of available implementations or their features.
+Readers are advised to note that other implementations may exist.
+
+## Cyrus IMAP
+
+* Organization: Cyrus IMAP project
+* Description: "ifUnchangedBy" for all JMAP data types implemented by Cyrus
+* Level of maturity: in development
+  (https://github.com/cyrusimap/cyrus-imapd/pull/6104)
+* Licensing: BSD-style
+* Contact: Bron Gondwana <brong@fastmailteam.com>
+
+## Fastmail
+
+* Organization: Fastmail
+* Description: "ifUnchangedBy" in Fastmail's internal JMAP server
+* Level of maturity: in development
+* Licensing: proprietary
+* Contact: Bron Gondwana <brong@fastmailteam.com>
 
 # IANA Considerations
 
@@ -479,6 +581,15 @@ read; such a condition MUST cause the method to fail with a "forbidden" error,
 so that the mechanism cannot be used as an oracle to probe the values of
 properties the client cannot otherwise see.
 
+This differs deliberately from a precondition on an object that does not exist
+or is not visible to the client, which is reported as "stateMismatch"
+({{effect}}).  For a client, an invisible object is indistinguishable from one
+that does not exist, and reporting it differently would disclose its existence.
+A property the client may not read, by contrast, belongs to an object the client
+can see; the restriction depends only on the client's rights, not on the
+property's value, so "forbidden" discloses nothing about the value and tells the
+client that the request cannot succeed however it is retried.
+
 ## Atomic Methods and Resource Consumption
 
 Applying a method atomically may require the server to hold a transaction, or
@@ -499,6 +610,21 @@ EDITOR: please remove this section before publication.
 
 The source of this document exists on github at:
 https://github.com/brong/draft-gondwana-jmap-conditional/
+
+**draft-ietf-jmap-conditional-01**
+
+* Moved the examples into their own section; they were previously nested under
+  the "Atomic Foo/set" section.
+* Added an example of atomically replacing one file with another (the POSIX
+  write-then-rename pattern).
+* Added Implementation Considerations, describing a generic way to evaluate
+  preconditions and to apply methods atomically.
+* Added an Implementation Status section.
+* Explained why a precondition on an unreadable property yields "forbidden"
+  while a precondition on an invisible object yields "stateMismatch".
+* Clarified that {{JMAP-CORE}} already permits, but does not require, a server
+  to accept changes such as a name exchange whose final state is valid;
+  "atomic" makes this a guarantee.
 
 **draft-ietf-jmap-conditional-00**
 
