@@ -524,8 +524,11 @@ Readers are advised to note that other implementations may exist.
 ## Cyrus IMAP
 
 * Organization: Cyrus IMAP project
-* Description: "ifUnchangedBy" for all JMAP data types implemented by Cyrus
-* Level of maturity: in development
+* Description: "ifUnchangedBy" and "atomic" for all JMAP data types implemented
+  by Cyrus.  "cannotApplyAtomically" is returned only for operations that
+  cannot be undone: immediate sends, and destroys that would remove data at
+  once under the server's configured delete or expunge mode.
+* Level of maturity: complete, under review
   (https://github.com/cyrusimap/cyrus-imapd/pull/6104)
 * Licensing: BSD-style
 * Contact: Bron Gondwana <brong@fastmailteam.com>
@@ -661,6 +664,7 @@ https://github.com/brong/draft-gondwana-jmap-conditional/
   not exist, rather than rejecting the method.
 * Allowed "null" in place of a PatchObject, asserting that the object does not
   exist.
+* Updated the Cyrus IMAP implementation status: "atomic" is now implemented.
 
 **draft-ietf-jmap-conditional-01**
 
