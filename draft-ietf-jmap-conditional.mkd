@@ -157,6 +157,10 @@ This document adds the following arguments to the standard Foo/set method
   id exists or is visible to the client, for example because it has been
   destroyed.
 
+  An empty PatchObject ("{}") is valid and asserts only that the object
+  exists: the precondition is satisfied if and only if an object with that
+  id exists and is visible to the client.
+
 * atomic: "Boolean" (default: false)
 
   If true, the Foo/set is applied as a single unit: the server MUST either
@@ -402,6 +406,27 @@ name has already been destroyed, by this client or another:
 
 If "r" still exists, the method is rejected with a "stateMismatch" error and
 "t" keeps its name.
+
+## Conditioning on an object still existing
+
+An empty PatchObject requires only that an object still exists, whatever its
+current values.  Here a client has generated a thumbnail of the file "f42" and
+uploads it as a new file, but only if "f42" has not been destroyed in the
+meantime, so that no orphaned thumbnail is left behind:
+
+~~~
+[[ "FileNode/set", {
+  "accountId": "u1",
+  "ifUnchangedBy": { "f42": {} },
+  "create": { "th1": { "parentId": "thumbs",
+                       "name": "f42.png",
+                       "blobId": "G_thumb" } }
+}, "0" ]]
+~~~
+
+If "f42" no longer exists, the method is rejected with a "stateMismatch" error
+and no thumbnail is created.  Changes to "f42" that leave it in place, such as
+a rename, do not cause the precondition to fail.
 
 ## Whole-object compare-and-swap
 
@@ -664,6 +689,8 @@ https://github.com/brong/draft-gondwana-jmap-conditional/
   not exist, rather than rejecting the method.
 * Allowed "null" in place of a PatchObject, asserting that the object does not
   exist.
+* Clarified that an empty PatchObject is valid and asserts only that the
+  object exists, and added an example.
 * Updated the Cyrus IMAP implementation status: "atomic" is now implemented.
 
 **draft-ietf-jmap-conditional-01**
