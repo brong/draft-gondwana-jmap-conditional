@@ -1,7 +1,7 @@
 ---
 title: JMAP Conditional Set
 abbrev: JMAP Conditional
-docname: draft-ietf-jmap-conditional-01
+docname: draft-ietf-jmap-conditional-02
 submissionType: IETF
 category: std
 updates: 8620
@@ -132,7 +132,7 @@ its presence applies to all types for which the server implements Foo/set.
 This document adds the following arguments to the standard Foo/set method
 ({{JMAP-CORE}}, Section 5.3):
 
-* ifUnchangedBy: "Id\[PatchObject\]" (default: an empty object)
+* ifUnchangedBy: "Id\[PatchObject\|null\]" (default: an empty object)
 
   A map of object id to a PatchObject expressing a precondition on that
   object.  For each entry, the precondition is satisfied if and only if
@@ -145,13 +145,25 @@ This document adds the following arguments to the standard Foo/set method
   removing the property would be a no-op).  Comparison uses the same
   representation the server would return for that property from Foo/get.
 
+  As in an update ({{JMAP-CORE}}, Section 5.3), a PatchObject with a
+  pointer whose parent does not exist in the current object cannot be
+  applied.  Such a precondition is never satisfied, whatever the value,
+  including "null": for example "participants/p1/name" cannot be satisfied
+  by an object with no "participants" property.  The server rejects the
+  method as for an invalid pointer (rule 4 of {{evaluation-rules}}).
+
+  A "null" value instead of a PatchObject asserts that the object does not
+  exist: the precondition is satisfied if and only if no object with that
+  id exists or is visible to the client, for example because it has been
+  destroyed.
+
 * atomic: "Boolean" (default: false)
 
   If true, the Foo/set is applied as a single unit: the server MUST either
   commit every creation, update, and destroy the method requests, or make no
   change at all.  See {{atomic}}.
 
-## Evaluation Rules
+## Evaluation Rules {#evaluation-rules}
 
 1.  Preconditions are evaluated against the state of each object as it exists
     at the start of the method, before any create, update, or destroy in the
@@ -160,14 +172,18 @@ This document adds the following arguments to the standard Foo/set method
 2.  Each key in "ifUnchangedBy" is the id of an object of the same type as the
     method (the "Foo" of "Foo/set").  The object need not be one the method
     changes.  A client MAY set a precondition on an object the method does not
-    change, for example its parent.  A precondition is not satisfied if its
-    object does not exist, or is not visible to the client.  The server then
+    change, for example its parent.  A PatchObject precondition is not
+    satisfied if its object does not exist, or is not visible to the client;
+    a "null" precondition is not satisfied if it does.  The server then
     handles it as in {{effect}}.  A creation id (an id prefixed with "#") MAY
     be a key.  It references an object created by an earlier method call in the
-    same request ({{JMAP-CORE}}, Section 5.3).  If the creation id resolves to
-    an object of a different type, the server MUST reject the whole method with
-    an "invalidArguments" error.  This lets a client require that an object it
-    created earlier in the request has not changed since then.
+    same request ({{JMAP-CORE}}, Section 5.3), and stands for the id that
+    creation produced.  If no object of this type has that id, because the
+    creation failed, created an object of a different type, or its object has
+    since been destroyed, the precondition is evaluated as for an object that
+    does not exist.  This lets a client require that an object it created
+    earlier in the request has not changed since then, or that it has since
+    been destroyed.
 
 3.  Unlike the PatchObject supplied in the "update" argument, which may only
     reference properties the client is permitted to set, the PatchObject in
@@ -178,7 +194,10 @@ This document adds the following arguments to the standard Foo/set method
 
 4.  If a pointer in an "ifUnchangedBy" PatchObject is not a valid pointer for
     the object's type, or the PatchObject is otherwise malformed, the server
-    MUST reject the whole method with an "invalidArguments" error.
+    MUST reject the whole method, with either an "invalidArguments" error or
+    a "stateMismatch" error as for an unsatisfied precondition.  A server need
+    not distinguish an invalid pointer from one that does not apply cleanly to
+    the current object.
 
 5.  The "ifUnchangedBy" and "ifInState" arguments are both method-level guards
     and compose.  If both are supplied, the server checks "ifInState" first and
@@ -367,6 +386,23 @@ If either "f42" has been reparented or "d3" has been renamed, the method is
 rejected with a "stateMismatch" error and the content is not written, even
 though "d3" itself is not being changed.
 
+## Conditioning on an object having been destroyed
+
+A "null" precondition requires that an object no longer exists.  Here a client
+renames "t" to "report.txt", but only if the file "r" that used to hold that
+name has already been destroyed, by this client or another:
+
+~~~
+[[ "FileNode/set", {
+  "accountId": "u1",
+  "ifUnchangedBy": { "r": null },
+  "update":       { "t": { "name": "report.txt" } }
+}, "0" ]]
+~~~
+
+If "r" still exists, the method is rejected with a "stateMismatch" error and
+"t" keeps its name.
+
 ## Whole-object compare-and-swap
 
 A data type that maintains a server-set change token can be used to require
@@ -449,6 +485,9 @@ result with the original.  Any difference means the precondition is not
 satisfied.  Every data type that supports Foo/set already has both a Foo/get
 representation and PatchObject application, so no new per-type machinery is
 required.
+
+If the PatchObject does not apply cleanly, the precondition is not satisfied,
+and the server may report it either way rule 4 of {{evaluation-rules}} allows.
 
 A server MAY instead compare the referenced values directly, or use any cheaper
 method, provided the outcome is the same.
@@ -610,6 +649,18 @@ EDITOR: please remove this section before publication.
 
 The source of this document exists on github at:
 https://github.com/brong/draft-gondwana-jmap-conditional/
+
+**draft-ietf-jmap-conditional-02**
+
+* Clarified that a precondition with a pointer whose parent does not exist in
+  the current object is never satisfied, whatever its value.
+* Allowed a server to reject such a precondition, an invalid pointer, or a
+  malformed PatchObject with either "invalidArguments" or "stateMismatch".
+* A creation id stands for the id it produced; if no object of the method's
+  type has that id, the precondition is evaluated as for an object that does
+  not exist, rather than rejecting the method.
+* Allowed "null" in place of a PatchObject, asserting that the object does not
+  exist.
 
 **draft-ietf-jmap-conditional-01**
 
